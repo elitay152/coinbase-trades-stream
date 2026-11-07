@@ -1,4 +1,4 @@
-from coinbase_stream.producer import flatten
+from coinbase_stream.producer import BACKOFF_MAX, backoff_delay, flatten
 
 SAMPLE = {
     "channel": "market_trades",
@@ -49,3 +49,17 @@ def test_message_without_events_yields_nothing():
     """Flatten should yield nothing for a subscriptions-style message with no events."""
     trades = list(flatten({"channel": "market_trades"}, "2026-11-07T04:52:23.600000+00:00"))
     assert len(trades) == 0
+
+def test_backoff_stays_within_cap():
+    """backoff_delay should return a value between 0 and the cap."""
+    for attempt in range(5):
+        cap = 2**attempt
+
+    for _ in range(1000):
+        delay = backoff_delay(attempt)
+        assert 0 <= delay <= cap
+
+def test_backoff_never_exceeds_max():
+    """backoff_delay should never return a value greater than BACKOFF_MAX."""
+    for _ in range(1000):
+        assert backoff_delay(20) <= BACKOFF_MAX

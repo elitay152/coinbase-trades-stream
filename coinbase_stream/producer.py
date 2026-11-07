@@ -1,13 +1,21 @@
 import asyncio
 import json
+import random
+import time
 from datetime import UTC, datetime
 
 import websockets
 from confluent_kafka import Producer
+from websockets.exceptions import WebSocketException
 
 WS_URL = "wss://advanced-trade-ws.coinbase.com"
 PRODUCTS = ["BTC-USD", "ETH-USD", "SOL-USD"]
 TOPIC = "coinbase.trades"
+
+STALE_AFTER = 30 # seconds with no message
+STABLE_AFTER = 60 # connection considered stable after this many seconds of messages
+BACKOFF_BASE = 1
+BACKOFF_MAX = 30
 
 def on_delivery(err, msg):
     """Notification of delivery result on error."""
@@ -27,7 +35,13 @@ def flatten(msg, received_at):
                 "received_at": received_at,
             }
 
-async def main(producer):
+def backoff_delay(attempt):
+    """Exponential backoff with full jitter: random wait between 0 and the cap."""
+    cap = min(BACKOFF_MAX, BACKOFF_BASE *2**attempt)
+    return random.uniform(0, cap)
+
+async def stream_trades(producer):
+    """Connect once and send trades to Kafka until the connection fails."""
     subscribe_msg = {
         "type": "subscribe",
         "product_ids": PRODUCTS,
@@ -36,8 +50,10 @@ async def main(producer):
 
     async with websockets.connect(WS_URL) as ws:
         await ws.send(json.dumps(subscribe_msg))
+        print("connected")
 
-        async for raw in ws:
+        while True:
+            raw = await asyncio.wait_for(ws.recv(), timeout=STALE_AFTER)
             received_at = datetime.now(UTC).isoformat()
             msg = json.loads(raw)
 
@@ -57,6 +73,23 @@ async def main(producer):
                       )
 
             producer.poll(0)
+
+async def main(producer):
+    attempt = 0
+
+    while True:
+        started = time.monotonic()
+        try:
+            await stream_trades(producer)
+        except (WebSocketException, OSError, TimeoutError) as e:
+            if time.monotonic() - started > STABLE_AFTER:
+                attempt = 0
+
+            delay = backoff_delay(attempt)
+            print(f"connection lost ({type(e).__name__}: {e}); reconnecting in {delay:.1f}s")
+            producer.poll(0)
+            await asyncio.sleep(delay)
+            attempt += 1
 
 if __name__ == "__main__":
 
