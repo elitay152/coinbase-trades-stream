@@ -4,6 +4,7 @@ from coinbase_stream.producer import flatten
 from coinbase_stream.sink import to_row
 from tests.test_producer import SAMPLE
 
+
 class FakeMessage:
     """Stands in for a Kafka message object."""
 
