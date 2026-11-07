@@ -1,0 +1,6 @@
+.coinbase-venv
+__pycache__/
+*.pyc
+.env
+*.duckdb
+*.duckdb.wal
