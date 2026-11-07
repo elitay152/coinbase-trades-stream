@@ -4,3 +4,4 @@ __pycache__/
 .env
 *.duckdb
 *.duckdb.wal
+.pytest_cache/

@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import websockets
 from confluent_kafka import Producer
@@ -8,8 +8,6 @@ from confluent_kafka import Producer
 WS_URL = "wss://advanced-trade-ws.coinbase.com"
 PRODUCTS = ["BTC-USD", "ETH-USD", "SOL-USD"]
 TOPIC = "coinbase.trades"
-
-producer = Producer({"bootstrap.servers": "localhost:19092"})
 
 def on_delivery(err, msg):
     """Notification of delivery result on error."""
@@ -29,7 +27,7 @@ def flatten(msg, received_at):
                 "received_at": received_at,
             }
 
-async def main():
+async def main(producer):
     subscribe_msg = {
         "type": "subscribe",
         "product_ids": PRODUCTS,
@@ -40,7 +38,7 @@ async def main():
         await ws.send(json.dumps(subscribe_msg))
 
         async for raw in ws:
-            received_at = datetime.now(timezone.utc).isoformat()
+            received_at = datetime.now(UTC).isoformat()
             msg = json.loads(raw)
 
             if msg.get("channel") != "market_trades":
@@ -60,9 +58,13 @@ async def main():
 
             producer.poll(0)
 
-try:
-    asyncio.run(main())
-except KeyboardInterrupt:
-    print("Stopping...")
-finally:
-    producer.flush(10)
+if __name__ == "__main__":
+
+    producer = Producer({"bootstrap.servers": "localhost:19092"})
+
+    try:
+        asyncio.run(main(producer))
+    except KeyboardInterrupt:
+        print("Stopping...")
+    finally:
+        producer.flush(10)
