@@ -1,4 +1,5 @@
 import json
+import os
 
 import duckdb
 from confluent_kafka import Consumer
@@ -8,6 +9,7 @@ from coinbase_stream.config import BOOTSTRAP_SERVERS, TOPIC, TRADES_DB
 GROUP_ID = "trades-sink"
 BATCH_SIZE = 500
 BATCH_TIMEOUT = 1.0
+CRASH_AFTER_WRITE = os.environ.get("CRASH_AFTER_WRITE") == "1"
 
 CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS trades (
@@ -92,13 +94,18 @@ def main():
             if not rows:
                 continue
 
+            before = con.execute("select count(*) from trades").fetchone()[0]
             con.begin()
             con.executemany(INSERT_TRADE, rows)
             con.commit()
+            after = con.execute("select count(*) from trades").fetchone()[0]
+            if CRASH_AFTER_WRITE:
+                print("simulating crash: rows written, offsets NOT committed")
+                os._exit(1)
 
             # only after the rows are safely in DuckDB
             consumer.commit(asynchronous=False)
-            print(f"wrote batch of {len(rows)}")
+            print(f"wrote batch of {len(rows)} ({after - before} new)")
     except KeyboardInterrupt:
         print("Stopping...")
     finally:
