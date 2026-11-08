@@ -1,12 +1,11 @@
 import json
-from pathlib import Path
 
 import duckdb
 from confluent_kafka import Consumer
 
-TOPIC = "coinbase.trades"
+from coinbase_stream.config import BOOTSTRAP_SERVERS, TOPIC, TRADES_DB
+
 GROUP_ID = "trades-sink"
-DB_PATH = Path("data/trades.duckdb")
 BATCH_SIZE = 500
 BATCH_TIMEOUT = 1.0
 
@@ -66,12 +65,12 @@ def to_row(msg):
     )
 
 def main():
-    DB_PATH.parent.mkdir(exist_ok=True)
-    con = duckdb.connect(str(DB_PATH))
+    TRADES_DB.parent.mkdir(exist_ok=True)
+    con = duckdb.connect(str(TRADES_DB))
     con.execute(CREATE_TABLE)
 
     consumer = Consumer({
-        "bootstrap.servers": "localhost:19092",
+        "bootstrap.servers": BOOTSTRAP_SERVERS,
         "group.id": GROUP_ID,
         "auto.offset.reset": "earliest",
         "enable.auto.commit": False,

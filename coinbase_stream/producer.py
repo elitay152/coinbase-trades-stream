@@ -8,9 +8,9 @@ import websockets
 from confluent_kafka import Producer
 from websockets.exceptions import WebSocketException
 
+from coinbase_stream.config import BOOTSTRAP_SERVERS, PRODUCTS, TOPIC
+
 WS_URL = "wss://advanced-trade-ws.coinbase.com"
-PRODUCTS = ["BTC-USD", "ETH-USD", "SOL-USD"]
-TOPIC = "coinbase.trades"
 
 STALE_AFTER = 30 # seconds with no message
 STABLE_AFTER = 60 # connection considered stable after this many seconds of messages
@@ -93,7 +93,7 @@ async def main(producer):
 
 if __name__ == "__main__":
 
-    producer = Producer({"bootstrap.servers": "localhost:19092"})
+    producer = Producer({"bootstrap.servers": BOOTSTRAP_SERVERS})
 
     try:
         asyncio.run(main(producer))
