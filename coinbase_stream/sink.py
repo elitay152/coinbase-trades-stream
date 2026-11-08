@@ -9,6 +9,8 @@ from coinbase_stream.config import BOOTSTRAP_SERVERS, TOPIC, TRADES_DB
 GROUP_ID = "trades-sink"
 BATCH_SIZE = 500
 BATCH_TIMEOUT = 1.0
+
+# Fault injection for docs/experiments.md: crash after the DB write, before the offset commit.
 CRASH_AFTER_WRITE = os.environ.get("CRASH_AFTER_WRITE") == "1"
 
 CREATE_TABLE = """
