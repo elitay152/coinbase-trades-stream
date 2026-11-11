@@ -173,6 +173,12 @@ def load_watermarks(con, agg):
     for product, last_start in rows:
         agg.watermarks[product] = last_start + WINDOW
 
+def write_candles(con, candles):
+    """Upsert closed candles in one transaction."""
+    with con.cursor() as cur:
+        cur.executemany(UPSERT_CANDLE, [c.row() for c in candles])
+    con.commit()
+
 def main():
     con = psycopg.connect(POSTGRES_DSN)
     con.execute(CREATE_TABLE)
@@ -206,9 +212,7 @@ def main():
 
             closed = agg.pop_closed()
             if closed:
-                with con.cursor() as cur:
-                    cur.executemany(UPSERT_CANDLE, [c.row() for c in closed])
-                con.commit()
+                write_candles(con, closed)
                 for c in closed:
                     print(
                         f"{c.product_id} {c.window_start:%H:%M} "
