@@ -17,9 +17,16 @@ STABLE_AFTER = 60 # connection considered stable after this many seconds of mess
 BACKOFF_BASE = 1
 BACKOFF_MAX = 30
 
+class DeliveryError(Exception):
+    """A message could not be delivered to Kafka after all retries."""
+
+delivery_failures = 0
+
 def on_delivery(err, msg):
-    """Notification of delivery result on error."""
+    """Count messages Kafka gave up on; stream_trades stops the producer if any."""
+    global delivery_failures
     if err is not None:
+        delivery_failures += 1
         print(f"delivery failed: {err}")
 
 def flatten(msg, received_at):
@@ -73,6 +80,8 @@ async def stream_trades(producer):
                       )
 
             producer.poll(0)
+            if delivery_failures:
+                raise DeliveryError(f"{delivery_failures} trades could not be delivered")
 
 async def main(producer):
     attempt = 0
@@ -93,7 +102,8 @@ async def main(producer):
 
 if __name__ == "__main__":
 
-    producer = Producer({"bootstrap.servers": BOOTSTRAP_SERVERS})
+    producer = Producer({"bootstrap.servers": BOOTSTRAP_SERVERS,
+                         "enable.idempotence": True,})
 
     try:
         asyncio.run(main(producer))

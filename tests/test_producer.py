@@ -1,3 +1,4 @@
+from coinbase_stream import producer
 from coinbase_stream.producer import BACKOFF_MAX, backoff_delay, flatten
 
 SAMPLE = {
@@ -63,3 +64,10 @@ def test_backoff_never_exceeds_max():
     """backoff_delay should never return a value greater than BACKOFF_MAX."""
     for _ in range(1000):
         assert backoff_delay(20) <= BACKOFF_MAX
+
+def test_on_delivery_counts_failures(monkeypatch):
+    monkeypatch.setattr(producer, "delivery_failures", 0)
+    producer.on_delivery(None, object())
+    assert producer.delivery_failures == 0
+    producer.on_delivery("broker down", object())
+    assert producer.delivery_failures == 1
