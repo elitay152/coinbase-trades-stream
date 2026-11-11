@@ -1,6 +1,6 @@
 # coinbase-trades-stream
 
-A small streaming pipeline that takes live crypto trades from Coinbase's public WebSocket feed, sends them through Kafka (Redpanda), and processes them in two ways: a sink that stores every raw trade, and an aggregator that builds 1-minute candles in real time.
+A small streaming pipeline that takes live crypto trades from Coinbase's public WebSocket feed, sends them through Kafka (Redpanda), and processes them in two ways: a sink that stores every raw trade, and an aggregator that builds 1-minute candles in real time. A Grafana dashboard shows the candles and the pipeline's health.
 
 This is a learning and portfolio project. It runs locally on one Redpanda broker with three trading pairs, so it isn't sized or tested for production load. The goal was hands-on practice with the parts of streaming that are hard to get right: partitioning, offset commits, duplicates, reconnects, event time and late data. The [experiments](docs/experiments.md) test that behavior by breaking things on purpose.
 
@@ -13,31 +13,37 @@ flowchart LR
     T -->|"group: trades-sink"| S["sink.py"]
     T -->|"group: trades-aggregator"| A["aggregator.py"]
     S --> TDB[("trades.duckdb<br/>every trade, deduped")]
-    A --> CDB[("candles.duckdb<br/>1-minute OHLCV + VWAP")]
+    A --> CDB[("Postgres: candles<br/>1-minute OHLCV + VWAP")]
+    CDB --> G["Grafana dashboard"]
 ```
+
+![Grafana dashboard](docs/dashboard.png)
 
 | Component | What it does |
 |---|---|
 | **Producer** | Subscribes to `market_trades` for BTC-USD, ETH-USD and SOL-USD. Splits each WebSocket message into one Kafka message per trade, keyed by `product_id`. Reconnects with exponential backoff and treats a silent connection as dead. |
 | **Sink** | Consumes in batches of up to 500 and writes every trade to DuckDB with idempotent inserts. Commits Kafka offsets only after the database write succeeds. |
-| **Aggregator** | Builds 1-minute candles (open, high, low, close, volume, VWAP) per product by event time. Uses a watermark to decide when a minute is complete, drops and counts late trades, and only commits offsets that are safe to recover from. |
+| **Aggregator** | Builds 1-minute candles (open, high, low, close, volume, VWAP) per product by event time. Uses a watermark to decide when a minute is complete, drops and counts late trades, and only commits offsets that are safe to recover from. Writes candles to Postgres with an upsert. |
+| **Dashboard** | Grafana reads the candles from Postgres: freshness, trades per minute, candles written per minute, missing minutes, and price per product. The datasource and dashboard are provisioned from files in `grafana/`. |
 
 The two consumers use separate consumer groups, so each reads the full stream independently at its own pace.
 
-**Stack:** Python 3.11, Redpanda (Kafka API) and Redpanda Console in Docker Compose, `confluent-kafka`, `websockets`, DuckDB, pytest, ruff, GitHub Actions.
+**Stack:** Python 3.11, Redpanda (Kafka API), Redpanda Console, Postgres and Grafana in Docker Compose, `confluent-kafka`, `websockets`, `psycopg`, DuckDB, pytest, ruff, GitHub Actions.
 
 ## Running it
 
 **Prerequisites:** Docker Desktop and Python 3.11.
 
-1. Start Redpanda and the Console, then create the topic:
+1. Copy `.env.example` to `.env` and set the passwords. Docker Compose and `config.py` both read it, and it's gitignored.
+
+2. Start Redpanda, the Console, Postgres and Grafana, then create the topic:
 
    ```bash
    docker compose up -d
    docker compose exec redpanda rpk topic create coinbase.trades -p 3
    ```
 
-2. Create a virtual environment and install the dependencies:
+3. Create a virtual environment and install the dependencies:
 
    ```bash
    python -m venv .venv
@@ -46,7 +52,7 @@ The two consumers use separate consumer groups, so each reads the full stream in
    pip install -r requirements.txt
    ```
 
-3. Run each process in its own terminal:
+4. Run each process in its own terminal:
 
    ```bash
    python -m coinbase_stream.producer
@@ -54,16 +60,23 @@ The two consumers use separate consumer groups, so each reads the full stream in
    python -m coinbase_stream.aggregator
    ```
 
-4. Look around:
+5. Look around:
+   - Grafana at http://localhost:3000 (user `admin`, password from `.env`). The **Coinbase Candles** dashboard is in the Coinbase folder.
    - Redpanda Console at http://localhost:8080 shows topics, partitions and messages.
    - Consumer lag: `docker compose exec redpanda rpk group describe trades-sink`
-   - Data: stop a consumer first, because DuckDB lets only one process write to a file at a time, then query its file:
+   - Candles:
 
      ```bash
-     python -c "import duckdb; print(duckdb.connect('data/candles.duckdb', read_only=True).sql('select * from candles order by window_start desc limit 10'))"
+     docker compose exec postgres psql -U coinbase -d coinbase -c "select * from candles order by window_start desc limit 10"
      ```
 
-Settings that depend on where the code runs (broker address, topic, products, data directory) live in [`config.py`](coinbase_stream/config.py) and can be overridden with environment variables such as `BOOTSTRAP_SERVERS` and `PRODUCTS`.
+   - Raw trades: stop the sink first, because DuckDB lets only one process open a file for writing, then query its file:
+
+     ```bash
+     python -c "import duckdb; print(duckdb.connect('data/trades.duckdb', read_only=True).sql('select * from trades order by trade_time desc limit 10'))"
+     ```
+
+Settings that depend on where the code runs (broker address, topic, products, data directory, Postgres connection) live in [`config.py`](coinbase_stream/config.py) and can be overridden with environment variables such as `BOOTSTRAP_SERVERS`, `PRODUCTS` and `POSTGRES_HOST`. `config.py` also loads `.env`.
 
 ## Design decisions
 
@@ -78,6 +91,10 @@ Settings that depend on where the code runs (broker address, topic, products, da
 **Event time, watermarks and late data.** A trade belongs to the minute of its exchange `time`, not the minute it arrived. Open and close are the earliest and latest trades by event time, with `trade_id` breaking ties, not the first and last to arrive. Each product has a watermark: the latest event time seen, minus 5 s of allowed lateness. Once the watermark passes the end of a window, the candle is final and written. Trades that arrive after their window was written are dropped and counted. Duplicates inside an open window are skipped using a per-candle set of trade IDs.
 
 **Crash-safe aggregator offsets.** Open candles only exist in memory, so the aggregator never commits past the oldest trade still in an open window. After a crash, Kafka replays those trades and the candles are rebuilt. On startup, the aggregator sets each product's watermark from the last candle in the table, so replayed trades for windows already written are skipped instead of overwriting complete candles with partial ones.
+
+**Two stores for two jobs.** Raw trades stay in DuckDB, a columnar file that's good for scanning lots of rows from one process. Candles live in Postgres, because a dashboard has to read while the aggregator writes, and DuckDB allows only one writing process per file. Candles are written with `INSERT ... ON CONFLICT (product_id, window_start) DO UPDATE`, so a replay overwrites a candle instead of duplicating it. Connection settings come from `.env`, which both Compose and `config.py` read, so no passwords are in the repo.
+
+**Dashboard as code.** The Grafana datasource has a fixed uid (`candles-pg`), and the dashboard JSON lives in `grafana/dashboards/`, so `docker compose up` on a fresh clone rebuilds both. Grafana reaches Postgres at `postgres:5432` on the Compose network, while Python on the host uses `localhost:5433`, the same internal/external split as Redpanda's listeners. Panels use `$__timeFilter` and `$__timeGroupAlias` so they follow the time picker, and `product_id IN ($product_id)` so multi-select and "All" work. Freshness (seconds since the last candle was written) is the "is the pipeline alive?" signal. Candles written per minute, grouped by `emitted_at` rather than `window_start`, shows stalls and catch-up after restarts.
 
 **Fast path and complete path.** The candles are fast but can miss late trades. The sink has no windows, so it keeps every trade, including late ones and trades recovered from reconnect snapshots. Rebuilding candles from the `trades` table in SQL would give exact results to check the streaming ones against.
 
@@ -96,6 +113,8 @@ Settings that depend on where the code runs (broker address, topic, products, da
 - **Late trades are dropped from candles.** This includes trades missed during a disconnect that come back in the reconnect snapshot. They are still in the `trades` table.
 - **The aggregator only works as a single instance.** Its state lives in memory, and a rebalance would move partitions away without moving the state.
 - **Long outages lose data.** The reconnect snapshot only covers recent trades. Anything older than it never reaches the pipeline.
+- **Quiet minutes count as missing.** The aggregator doesn't write empty candles, so the dashboard's missing-candles count includes minutes with no trades as well as real gaps.
+- **Grafana reads with the writer's credentials.** It uses the same Postgres user as the aggregator rather than a read-only one.
 - **No schema validation.** Messages are plain dicts. A change in Coinbase's format would surface as a `KeyError` deep in a consumer.
 
 ## What I'd do next
@@ -108,6 +127,7 @@ Settings that depend on where the code runs (broker address, topic, products, da
 - Use a schema registry (Avro or Protobuf) for the topic.
 - Run the producer and consumers in Docker Compose too, using the internal listener (`BOOTSTRAP_SERVERS=redpanda:9092`).
 - Export metrics: consumer lag, late-trade counts, and the gaps between exchange time, receive time and consume time.
+- Grafana alerting on freshness, and a read-only Postgres role for the dashboard.
 
 ## Tests and CI
 
@@ -117,7 +137,7 @@ ruff check .
 pytest
 ```
 
-The unit tests cover the pure logic, which needs no broker or network: flattening and ordering trades, backoff bounds, converting messages to rows (using a fake Kafka message), and the aggregator (open and close by event time, volume and VWAP, deduplication, the lateness allowance, dropping late trades, and safe offsets). GitHub Actions runs ruff and pytest on every push and pull request.
+The unit tests cover the pure logic, which needs no broker, database or network: flattening and ordering trades, backoff bounds, converting messages to rows (using a fake Kafka message), and the aggregator (open and close by event time, volume and VWAP, deduplication, the lateness allowance, dropping late trades, and safe offsets). GitHub Actions runs ruff and pytest on every push and pull request.
 
 ## License
 

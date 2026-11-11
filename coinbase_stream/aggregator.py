@@ -1,12 +1,12 @@
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
-import duckdb
+import psycopg
 from confluent_kafka import Consumer, TopicPartition
 
-from coinbase_stream.config import BOOTSTRAP_SERVERS, CANDLES_DB, TOPIC
+from coinbase_stream.config import BOOTSTRAP_SERVERS, POSTGRES_DSN, TOPIC
 
 GROUP_ID = "trades-aggregator"
 BATCH_SIZE = 500
@@ -32,18 +32,19 @@ CREATE TABLE IF NOT EXISTS candles (
 """
 
 UPSERT_CANDLE = """
-INSERT OR REPLACE INTO candles (
-    product_id,
-    window_start,
-    open,
-    high,
-    low,
-    close,
-    volume,
-    vwap,
-    trade_count
+INSERT INTO candles (
+    product_id, window_start, open, high, low, close, volume, vwap, trade_count
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (product_id, window_start) DO UPDATE SET
+    open = EXCLUDED.open,
+    high = EXCLUDED.high,
+    low = EXCLUDED.low,
+    close = EXCLUDED.close,
+    volume = EXCLUDED.volume,
+    vwap = EXCLUDED.vwap,
+    trade_count = EXCLUDED.trade_count,
+    emitted_at = now()
 """
 
 @dataclass
@@ -104,13 +105,13 @@ class Candle:
         vwap = (self.notional / self.volume).quantize(EIGHT_PLACES) if self.volume else self.close
         return (
             self.product_id,
-            self.window_start.isoformat(),
-            str(self.open),
-            str(self.high),
-            str(self.low),
-            str(self.close),
-            str(self.volume),
-            str(vwap),
+            self.window_start,
+            self.open,
+            self.high,
+            self.low,
+            self.close,
+            self.volume,
+            vwap,
             len(self.trade_ids),
         )
 
@@ -166,16 +167,16 @@ class Aggregator:
 def load_watermarks(con, agg):
     """After a restart, skip windows that were already written."""
     rows = con.execute(
-        "SELECT product_id, epoch(max(window_start)) FROM candles GROUP BY product_id"
+        "SELECT product_id, max(window_start) FROM candles GROUP BY product_id"
     ).fetchall()
 
     for product, last_start in rows:
-        agg.watermarks[product] = datetime.fromtimestamp(last_start, UTC) + WINDOW
+        agg.watermarks[product] = last_start + WINDOW
 
 def main():
-    CANDLES_DB.parent.mkdir(exist_ok=True)
-    con = duckdb.connect(str(CANDLES_DB))
+    con = psycopg.connect(POSTGRES_DSN)
     con.execute(CREATE_TABLE)
+    con.commit()
 
     agg = Aggregator()
     load_watermarks(con, agg)
@@ -205,8 +206,8 @@ def main():
 
             closed = agg.pop_closed()
             if closed:
-                con.begin()
-                con.executemany(UPSERT_CANDLE, [c.row() for c in closed])
+                with con.cursor() as cur:
+                    cur.executemany(UPSERT_CANDLE, [c.row() for c in closed])
                 con.commit()
                 for c in closed:
                     print(
